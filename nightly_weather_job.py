@@ -22,7 +22,7 @@ def update_missing_weather():
         )
         cur = conn.cursor()
         
-        # Find rows missing weather data
+        # We search for rows where temperature IS NULL
         cur.execute("SELECT id FROM feedback_ratings WHERE temperature IS NULL;")
         missing_rows = cur.fetchall()
         
@@ -34,14 +34,13 @@ def update_missing_weather():
             
         logging.info(f"Found {len(missing_rows)} rows missing weather data. Processing...")
 
-        # FIX 1: Request ALL 6 weather variables from the API
+        # Request ALL 6 weather variables from the API
         weather_url = "https://api.open-meteo.com/v1/forecast?latitude=-36.85&longitude=174.76&current=temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,relative_humidity_2m"
         response = requests.get(weather_url, timeout=5)
         weather_data = response.json()
         
         current_data = weather_data.get('current', {})
         
-        # Extract all variables
         temp = current_data.get('temperature_2m')
         app_temp = current_data.get('apparent_temperature')
         precip = current_data.get('precipitation')
@@ -49,9 +48,9 @@ def update_missing_weather():
         wind = current_data.get('wind_speed_10m')
         humidity = current_data.get('relative_humidity_2m')
         
-        logging.info(f"Fetched current weather fallback: Temp {temp}°C, Weather Code {w_code}")
+        logging.info(f"VERIFY NEW SCRIPT - Fetched: Temp {temp}, Apparent {app_temp}, Precip {precip}, Code {w_code}, Wind {wind}, Humidity {humidity}")
 
-        # FIX 1 (Continued): Update ALL separate columns in the database loop
+        # Update ALL columns in the database loop
         for row in missing_rows:
             row_id = row[0]
             cur.execute(
