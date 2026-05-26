@@ -18,7 +18,7 @@ def get_db_connection():
         database=DB_NAME,
         user=DB_USER,
         password=DB_PASS,
-        port=DB_PORT
+        port=DB_PORT,      # <--- ADD THIS COMMA RIGHT HERE!
         sslmode='require'  # <--- CRITICAL: You must add this line for Neon!
     )
     return conn
