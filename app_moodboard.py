@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify
 import psycopg2
-import requests 
-import os
+import requests
+import logging
+from datetime import datetime
 
-app = Flask(__name__)
+# --- Set Up Logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Database Configuration ---
 DB_HOST = "ep-lively-breeze-aqxoqdds-pooler.c-8.us-east-1.aws.neon.tech"  
@@ -12,85 +13,99 @@ DB_USER = "neondb_owner"
 DB_PASS = "npg_Exf9wJS2ZNRD"                                        
 DB_PORT = "5432"
 
-def get_db_connection():
-    """Establishes and returns a connection to the PostgreSQL database."""
-    conn = psycopg2.connect(
-        host=DB_HOST,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        port=DB_PORT,      
-        sslmode='require'  
-    )
-    return conn
-
-@app.route('/api/rating', methods=['POST'])
-def receive_rating():
-    print("\n========== INCOMING REQUEST DETECTED ==========")
-    
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "Invalid JSON"}), 400
-
-    q_id = data.get('question_id')
-    score = data.get('rating_score')
-    print(f"Parsed Content -> Question ID: {q_id} | Rating Score: {score}")
-
-    # --- Fetch Advanced Auckland Weather from Open-Meteo ---
-    print("Fetching advanced live weather for Auckland...")
-    
-    # Initialize variables as None in case the API fails
-    temp = app_temp = precip = w_code = wind = humidity = None
+def update_missing_weather_historically():
+    logging.info("Starting historical weather batch job...")
     
     try:
-        # We ask for all 6 variables in this single URL
-        weather_url = "https://api.open-meteo.com/v1/forecast?latitude=-36.85&longitude=174.76&current=temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,relative_humidity_2m"
-        response = requests.get(weather_url, timeout=5)
-        weather_data = response.json()
-        
-        current_data = weather_data.get('current', {})
-        
-        # Extract each specific piece of data
-        temp = current_data.get('temperature_2m')
-        app_temp = current_data.get('apparent_temperature')
-        precip = current_data.get('precipitation')
-        w_code = current_data.get('weather_code')
-        wind = current_data.get('wind_speed_10m')
-        humidity = current_data.get('relative_humidity_2m')
-        
-        print(f"Weather fetched! Temp: {temp}°C, Precip: {precip}mm, Wind: {wind}km/h")
-    except Exception as e:
-        print(f"Weather API failed (will save rating with empty weather columns): {e}")
-
-    # --- Database Insertion ---
-    try:
-        print("Attempting connection to PostgreSQL database...")
-        conn = get_db_connection()
+        conn = psycopg2.connect(
+            host=DB_HOST, database=DB_NAME, user=DB_USER, 
+            password=DB_PASS, port=DB_PORT, sslmode='require'
+        )
         cur = conn.cursor()
         
-        # Inject all the separated variables into their own columns
-        cur.execute(
-            """INSERT INTO feedback_ratings 
-               (question_id, rating_score, temperature, apparent_temperature, precipitation, weather_code, wind_speed, humidity) 
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (q_id, score, temp, app_temp, precip, w_code, wind, humidity)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("DATABASE SUCCESS! Row and full weather data added to PostgreSQL.")
+        # We grab BOTH the ID and the timestamp this time
+        cur.execute("SELECT id, created_at FROM feedback_ratings WHERE temperature IS NULL;")
+        missing_rows = cur.fetchall()
         
-        # Send the data back to the ESP32
-        return jsonify({
-            "status": "success", 
-            "message": "Saved to database",
-            "temperature": temp,
-            "weather_code": w_code
-        }), 201
+        if not missing_rows:
+            logging.info("No missing weather data found. Database is up to date!")
+            cur.close()
+            conn.close()
+            return
+            
+        # STEP 1: Group the missing rows by Date to prevent spamming the API
+        date_groups = {}
+        for row in missing_rows:
+            row_id = row[0]
+            created_at = row[1] # This is a Python datetime object from Postgres
+            
+            # Extract the date string (YYYY-MM-DD) and the exact hour (0-23)
+            date_str = created_at.strftime("%Y-%m-%d")
+            hour = created_at.hour
+            
+            if date_str not in date_groups:
+                date_groups[date_str] = []
+                
+            date_groups[date_str].append({'id': row_id, 'hour': hour})
+            
+        logging.info(f"Found {len(missing_rows)} missing rows spread across {len(date_groups)} different days.")
+
+        # STEP 2: Fetch the historical weather for each unique day
+        for date_str, rows in date_groups.items():
+            logging.info(f"Fetching 24-hour weather history for {date_str}...")
+            
+            # Open-Meteo's API allows searching past dates by specifying start_date and end_date
+            weather_url = (
+                f"https://api.open-meteo.com/v1/forecast?latitude=-36.85&longitude=174.76"
+                f"&start_date={date_str}&end_date={date_str}"
+                f"&hourly=temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,relative_humidity_2m"
+                f"&timezone=Pacific%2FAuckland"
+            )
+            
+            response = requests.get(weather_url, timeout=10)
+            weather_data = response.json()
+            
+            if 'hourly' not in weather_data:
+                logging.error(f"API failed to return hourly data for {date_str}. Skipping these rows.")
+                continue
+                
+            hourly_data = weather_data['hourly']
+            
+            # STEP 3: Match the exact hour to the database row
+            for r in rows:
+                row_id = r['id']
+                hr = r['hour'] # e.g., if it happened at 14:30, the hour is 14
+                
+                # The API returns an array of 24 items (one for each hour). We use the hour as the array index!
+                temp = hourly_data['temperature_2m'][hr]
+                app_temp = hourly_data['apparent_temperature'][hr]
+                precip = hourly_data['precipitation'][hr]
+                w_code = hourly_data['weather_code'][hr]
+                wind = hourly_data['wind_speed_10m'][hr]
+                humidity = hourly_data['relative_humidity_2m'][hr]
+                
+                cur.execute(
+                    """UPDATE feedback_ratings 
+                       SET temperature = %s, 
+                           apparent_temperature = %s, 
+                           precipitation = %s, 
+                           weather_code = %s, 
+                           wind_speed = %s, 
+                           humidity = %s 
+                       WHERE id = %s""",
+                    (temp, app_temp, precip, w_code, wind, humidity, row_id)
+                )
+                
+        conn.commit()
+        logging.info("Successfully patched all historical weather data!")
 
     except Exception as e:
-        print(f"DATABASE ERROR: {e}")
-        return jsonify({"status": "network_test_success", "db_error": str(e), "temperature": temp}), 201
+        logging.error(f"Batch job failed due to an error: {e}")
+        raise e
+        
+    finally:
+        if 'cur' in locals(): cur.close()
+        if 'conn' in locals(): conn.close()
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    update_missing_weather_historically()
