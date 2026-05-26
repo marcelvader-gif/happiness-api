@@ -5,11 +5,11 @@ import os
 app = Flask(__name__)
 
 # --- Database Configuration ---
-DB_HOST = os.environ.get("DB_HOST", "localhost")
-DB_NAME = os.environ.get("DB_NAME", "happiness_app")
-DB_USER = os.environ.get("DB_USER", "postgres")
-DB_PASS = os.environ.get("DB_PASS", "MV@postgres01")
-DB_PORT = os.environ.get("DB_PORT", "5432")
+DB_HOST = "ep-cool-cloud-12345.region.aws.neon.tech"  # The middle part of your Neon link
+DB_NAME = "neondb"                                    # Usually neondb
+DB_USER = "neondb_owner"                              # Usually neondb_owner
+DB_PASS = "npg_Exf9wJS2ZNRD"                        # The password you saved to Notepad
+DB_PORT = "5432"
 
 def get_db_connection():
     """Establishes and returns a connection to the PostgreSQL database."""
@@ -19,6 +19,7 @@ def get_db_connection():
         user=DB_USER,
         password=DB_PASS,
         port=DB_PORT
+        sslmode='require'  # <--- CRITICAL: You must add this line for Neon!
     )
     return conn
 
