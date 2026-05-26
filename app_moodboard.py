@@ -1,14 +1,15 @@
 from flask import Flask, request, jsonify
 import psycopg2
+import requests 
 import os
 
 app = Flask(__name__)
 
 # --- Database Configuration ---
-DB_HOST = "ep-lively-breeze-aqxoqdds-pooler.c-8.us-east-1.aws.neon.tech"  # The middle part of your Neon link
-DB_NAME = "neondb"                                    # Usually neondb
-DB_USER = "neondb_owner"                              # Usually neondb_owner
-DB_PASS = "npg_Exf9wJS2ZNRD"                        # The password you saved to Notepad
+DB_HOST = "ep-lively-breeze-aqxoqdds-pooler.c-8.us-east-1.aws.neon.tech"  
+DB_NAME = "neondb"                                                    
+DB_USER = "neondb_owner"                                              
+DB_PASS = "npg_Exf9wJS2ZNRD"                                        
 DB_PORT = "5432"
 
 def get_db_connection():
@@ -18,49 +19,78 @@ def get_db_connection():
         database=DB_NAME,
         user=DB_USER,
         password=DB_PASS,
-        port=DB_PORT,      # <--- ADD THIS COMMA RIGHT HERE!
-        sslmode='require'  # <--- CRITICAL: You must add this line for Neon!
+        port=DB_PORT,      
+        sslmode='require'  
     )
     return conn
 
 @app.route('/api/rating', methods=['POST'])
 def receive_rating():
-    print("\n========== INCOMING LOCAL REQUEST DETECTED ==========")
-    raw_data = request.get_data(as_text=True)
-    print(f"Raw Request Payload: {raw_data}")
-
+    print("\n========== INCOMING REQUEST DETECTED ==========")
+    
     data = request.get_json(silent=True)
     if not data:
-        print("ERROR: Could not parse payload as JSON.")
         return jsonify({"error": "Invalid JSON"}), 400
 
     q_id = data.get('question_id')
     score = data.get('rating_score')
     print(f"Parsed Content -> Question ID: {q_id} | Rating Score: {score}")
 
+    # --- Fetch Advanced Auckland Weather from Open-Meteo ---
+    print("Fetching advanced live weather for Auckland...")
+    
+    # Initialize variables as None in case the API fails
+    temp = app_temp = precip = w_code = wind = humidity = None
+    
     try:
-        print("Attempting connection to local PostgreSQL database...")
+        # We ask for all 6 variables in this single URL
+        weather_url = "https://api.open-meteo.com/v1/forecast?latitude=-36.85&longitude=174.76&current=temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,relative_humidity_2m"
+        response = requests.get(weather_url, timeout=5)
+        weather_data = response.json()
+        
+        current_data = weather_data.get('current', {})
+        
+        # Extract each specific piece of data
+        temp = current_data.get('temperature_2m')
+        app_temp = current_data.get('apparent_temperature')
+        precip = current_data.get('precipitation')
+        w_code = current_data.get('weather_code')
+        wind = current_data.get('wind_speed_10m')
+        humidity = current_data.get('relative_humidity_2m')
+        
+        print(f"Weather fetched! Temp: {temp}°C, Precip: {precip}mm, Wind: {wind}km/h")
+    except Exception as e:
+        print(f"Weather API failed (will save rating with empty weather columns): {e}")
+
+    # --- Database Insertion ---
+    try:
+        print("Attempting connection to PostgreSQL database...")
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Inject all the separated variables into their own columns
         cur.execute(
-            "INSERT INTO feedback_ratings (question_id, rating_score) VALUES (%s, %s)",
-            (q_id, score)
+            """INSERT INTO feedback_ratings 
+               (question_id, rating_score, temperature, apparent_temperature, precipitation, weather_code, wind_speed, humidity) 
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (q_id, score, temp, app_temp, precip, w_code, wind, humidity)
         )
         conn.commit()
         cur.close()
         conn.close()
-        print("DATABASE SUCCESS! Row added to PostgreSQL.")
-        return jsonify({"status": "success", "message": "Saved to database"}), 201
+        print("DATABASE SUCCESS! Row and full weather data added to PostgreSQL.")
+        
+        # Send the data back to the ESP32
+        return jsonify({
+            "status": "success", 
+            "message": "Saved to database",
+            "temperature": temp,
+            "weather_code": w_code
+        }), 201
 
     except Exception as e:
-        # LOCAL FALLBACK ROUTINE:
-        # If your local database is paused or missing the table during your class demo,
-        # it prints the error locally but keeps the ESP32 happy!
-        print(f"DATABASE NOT READY YET: {e}")
-        print("NETWORK TEST MODE: Sending dummy 201 success to ESP32 anyway!")
-        print("===================================================\n")
-        return jsonify({"status": "network_test_success", "db_error": str(e)}), 201
+        print(f"DATABASE ERROR: {e}")
+        return jsonify({"status": "network_test_success", "db_error": str(e), "temperature": temp}), 201
 
 if __name__ == '__main__':
-    # Binds to 0.0.0.0 so devices on your hotspot network can see it
     app.run(host='0.0.0.0', port=5000)
