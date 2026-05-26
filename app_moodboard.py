@@ -5,7 +5,7 @@ import os
 app = Flask(__name__)
 
 # --- Database Configuration ---
-DB_HOST = "ep-cool-cloud-12345.region.aws.neon.tech"  # The middle part of your Neon link
+DB_HOST = "ep-lively-breeze-aqxoqdds-pooler.c-8.us-east-1.aws.neon.tech"  # The middle part of your Neon link
 DB_NAME = "neondb"                                    # Usually neondb
 DB_USER = "neondb_owner"                              # Usually neondb_owner
 DB_PASS = "npg_Exf9wJS2ZNRD"                        # The password you saved to Notepad
