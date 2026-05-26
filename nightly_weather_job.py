@@ -63,6 +63,7 @@ def update_missing_weather():
 
     except Exception as e:
         logging.error(f"Batch job failed due to an error: {e}")
+        raise e # <--- THIS WILL FORCE GITHUB TO TURN RED IF IT FAILS!
         
     finally:
         if 'cur' in locals(): cur.close()
