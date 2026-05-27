@@ -51,16 +51,16 @@ def update_missing_weather_historically():
 
         # STEP 2: Fetch the historical weather for each unique day
         for date_str, rows in date_groups.items():
-            logging.info(f"Fetching 24-hour weather history for {date_str}...")
+            logging.info(f"Fetching 24-hour weather archive for {date_str}...")
             
+            # --- FIXED URL: Using the Archive API instead of Forecast ---
             weather_url = (
-                f"https://api.open-meteo.com/v1/forecast?latitude=-36.85&longitude=174.76"
+                f"https://archive-api.open-meteo.com/v1/archive?latitude=-36.85&longitude=174.76"
                 f"&start_date={date_str}&end_date={date_str}"
                 f"&hourly=temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,relative_humidity_2m"
                 f"&timezone=Pacific%2FAuckland"
             )
             
-            # --- THE NEW RETRY LOOP ---
             max_retries = 3
             weather_data = None
             
@@ -69,16 +69,15 @@ def update_missing_weather_historically():
                     response = requests.get(weather_url, timeout=30)
                     response.raise_for_status() 
                     weather_data = response.json()
-                    break # Success! Break out of the retry loop
+                    break 
                     
                 except Exception as api_err:
                     if attempt < max_retries - 1:
                         logging.warning(f"API timeout for {date_str}. Retrying in 5 seconds... (Attempt {attempt + 1} of {max_retries})")
-                        time.sleep(5) # Wait 5 seconds before trying again
+                        time.sleep(5) 
                     else:
                         logging.error(f"API failed for {date_str} after {max_retries} attempts. Skipping this day.")
             
-            # If weather_data is still None, it means all 3 attempts failed
             if not weather_data or 'hourly' not in weather_data:
                 continue
                 
@@ -90,6 +89,12 @@ def update_missing_weather_historically():
                 hr = r['hour'] 
                 
                 temp = hourly_data['temperature_2m'][hr]
+                
+                # --- NEW SAFETY CHECK: Don't write NULLs to the database ---
+                if temp is None:
+                    logging.warning(f"API returned null data for {date_str} at hour {hr}. Skipping DB update.")
+                    continue
+                    
                 app_temp = hourly_data['apparent_temperature'][hr]
                 precip = hourly_data['precipitation'][hr]
                 w_code = hourly_data['weather_code'][hr]
@@ -108,11 +113,13 @@ def update_missing_weather_historically():
                     (temp, app_temp, precip, w_code, wind, humidity, row_id)
                 )
             
+            # Save progress instantly after each successful day
+            conn.commit()
+            
             # Polite delay between successful daily calls
             time.sleep(2)
                 
-        conn.commit()
-        logging.info("Successfully patched all historical weather data!")
+        logging.info("Batch job fully complete!")
 
     except Exception as e:
         logging.error(f"Batch job failed due to an error: {e}")
