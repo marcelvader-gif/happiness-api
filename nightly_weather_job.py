@@ -1,6 +1,7 @@
 import psycopg2
 import requests
 import logging
+import time
 from datetime import datetime
 
 # --- Set Up Logging ---
@@ -23,7 +24,7 @@ def update_missing_weather_historically():
         )
         cur = conn.cursor()
         
-        # We grab BOTH the ID and the timestamp this time
+        # We grab BOTH the ID and the timestamp
         cur.execute("SELECT id, created_at FROM feedback_ratings WHERE temperature IS NULL;")
         missing_rows = cur.fetchall()
         
@@ -33,13 +34,12 @@ def update_missing_weather_historically():
             conn.close()
             return
             
-        # STEP 1: Group the missing rows by Date to prevent spamming the API
+        # STEP 1: Group the missing rows by Date
         date_groups = {}
         for row in missing_rows:
             row_id = row[0]
-            created_at = row[1] # This is a Python datetime object from Postgres
+            created_at = row[1] 
             
-            # Extract the date string (YYYY-MM-DD) and the exact hour (0-23)
             date_str = created_at.strftime("%Y-%m-%d")
             hour = created_at.hour
             
@@ -54,7 +54,6 @@ def update_missing_weather_historically():
         for date_str, rows in date_groups.items():
             logging.info(f"Fetching 24-hour weather history for {date_str}...")
             
-            # Open-Meteo's API allows searching past dates by specifying start_date and end_date
             weather_url = (
                 f"https://api.open-meteo.com/v1/forecast?latitude=-36.85&longitude=174.76"
                 f"&start_date={date_str}&end_date={date_str}"
@@ -62,11 +61,17 @@ def update_missing_weather_historically():
                 f"&timezone=Pacific%2FAuckland"
             )
             
-            response = requests.get(weather_url, timeout=10)
-            weather_data = response.json()
-            
+            try:
+                # INCREASED TIMEOUT TO 30 SECONDS
+                response = requests.get(weather_url, timeout=30)
+                response.raise_for_status() # Check for HTTP errors
+                weather_data = response.json()
+            except Exception as api_err:
+                logging.error(f"API failed for {date_str}: {api_err}. Skipping this day.")
+                continue
+                
             if 'hourly' not in weather_data:
-                logging.error(f"API failed to return hourly data for {date_str}. Skipping these rows.")
+                logging.error(f"No hourly data returned for {date_str}. Skipping.")
                 continue
                 
             hourly_data = weather_data['hourly']
@@ -74,9 +79,8 @@ def update_missing_weather_historically():
             # STEP 3: Match the exact hour to the database row
             for r in rows:
                 row_id = r['id']
-                hr = r['hour'] # e.g., if it happened at 14:30, the hour is 14
+                hr = r['hour'] 
                 
-                # The API returns an array of 24 items (one for each hour). We use the hour as the array index!
                 temp = hourly_data['temperature_2m'][hr]
                 app_temp = hourly_data['apparent_temperature'][hr]
                 precip = hourly_data['precipitation'][hr]
@@ -95,6 +99,9 @@ def update_missing_weather_historically():
                        WHERE id = %s""",
                     (temp, app_temp, precip, w_code, wind, humidity, row_id)
                 )
+            
+            # POLITE DELAY: Pause for 1.5 seconds so Open-Meteo doesn't block us
+            time.sleep(1.5)
                 
         conn.commit()
         logging.info("Successfully patched all historical weather data!")
