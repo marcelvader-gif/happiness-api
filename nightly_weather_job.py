@@ -24,7 +24,6 @@ def update_missing_weather_historically():
         )
         cur = conn.cursor()
         
-        # We grab BOTH the ID and the timestamp
         cur.execute("SELECT id, created_at FROM feedback_ratings WHERE temperature IS NULL;")
         missing_rows = cur.fetchall()
         
@@ -61,17 +60,26 @@ def update_missing_weather_historically():
                 f"&timezone=Pacific%2FAuckland"
             )
             
-            try:
-                # INCREASED TIMEOUT TO 30 SECONDS
-                response = requests.get(weather_url, timeout=30)
-                response.raise_for_status() # Check for HTTP errors
-                weather_data = response.json()
-            except Exception as api_err:
-                logging.error(f"API failed for {date_str}: {api_err}. Skipping this day.")
-                continue
-                
-            if 'hourly' not in weather_data:
-                logging.error(f"No hourly data returned for {date_str}. Skipping.")
+            # --- THE NEW RETRY LOOP ---
+            max_retries = 3
+            weather_data = None
+            
+            for attempt in range(max_retries):
+                try:
+                    response = requests.get(weather_url, timeout=30)
+                    response.raise_for_status() 
+                    weather_data = response.json()
+                    break # Success! Break out of the retry loop
+                    
+                except Exception as api_err:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"API timeout for {date_str}. Retrying in 5 seconds... (Attempt {attempt + 1} of {max_retries})")
+                        time.sleep(5) # Wait 5 seconds before trying again
+                    else:
+                        logging.error(f"API failed for {date_str} after {max_retries} attempts. Skipping this day.")
+            
+            # If weather_data is still None, it means all 3 attempts failed
+            if not weather_data or 'hourly' not in weather_data:
                 continue
                 
             hourly_data = weather_data['hourly']
@@ -100,8 +108,8 @@ def update_missing_weather_historically():
                     (temp, app_temp, precip, w_code, wind, humidity, row_id)
                 )
             
-            # POLITE DELAY: Pause for 1.5 seconds so Open-Meteo doesn't block us
-            time.sleep(1.5)
+            # Polite delay between successful daily calls
+            time.sleep(2)
                 
         conn.commit()
         logging.info("Successfully patched all historical weather data!")
